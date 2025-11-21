@@ -1,0 +1,14 @@
+# Rust build artifacts
+/target/
+
+# Nix build results
+/result
+
+# Logs
+logs/
+
+# Environment files
+.env
+
+# SCIM data
+scim_data/
