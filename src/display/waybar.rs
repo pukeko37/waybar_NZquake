@@ -79,80 +79,26 @@ impl WaybarFormatter {
         let (user_lat, user_lon) = quake_data.user_location;
         let mut lines = vec!["Recent NZ Earthquakes (by day band):\n".to_string()];
 
-        // Find the highest score
-        let max_score = quake_data
-            .earthquakes
-            .iter()
-            .map(|eq| eq.score)
-            .max_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
-            .unwrap_or(0.0);
-
+        let max_score = find_max_score(&quake_data.earthquakes);
         let mut current_day_band: Option<u32> = None;
 
         for quake in &quake_data.earthquakes {
-            let age_days = quake.age_in_days();
-            let day_band = get_day_band(age_days);
+            let day_band = get_day_band(quake.age_in_days());
 
-            // Add day band header if changed
             if current_day_band != Some(day_band) {
-                let band_label = match day_band {
-                    0 => "⏰ Last 24 hours:",
-                    1 => "\n⏰ 1-2 days ago:",
-                    2 => "\n⏰ 2-4 days ago:",
-                    3 => "\n⏰ 4-8 days ago:",
-                    _ => "\n⏰ 8+ days ago:",
-                };
-                lines.push(band_label.to_string());
+                lines.push(format_day_band_header(day_band));
                 current_day_band = Some(day_band);
             }
 
-            let distance = quake.horizontal_distance_from(user_lat, user_lon);
-            let direction = quake.direction_from(user_lat, user_lon);
-
-            // Format time (remove the .milliseconds and Z)
-            let time_display = if let Some(t_pos) = quake.time.find('T') {
-                let time_part = &quake.time[t_pos + 1..];
-                let time_clean = time_part.split('.').next().unwrap_or(time_part);
-                format!("{} {}", &quake.time[..t_pos], time_clean)
-            } else {
-                quake.time.clone()
-            };
-
-            // Only show quality if it's not "best" (to reduce noise)
-            let quality_display = if quake.quality == "best" {
-                String::new()
-            } else {
-                format!("🎯 {} | ", quake.quality)
-            };
-
-            let line = format!(
-                "  📅 {} | M{:.1} | 📏 {:.1}km | {}{} {:.0}km | MMI {}",
-                time_display,
-                quake.magnitude,
-                quake.depth,
-                quality_display,
-                direction,
-                distance,
-                quake.mmi.map(|m| m.to_string()).unwrap_or("-".to_string())
-            );
-
-            // Highlight the highest scoring event in green
-            if (quake.score - max_score).abs() < 0.001 {
+            let line = format_earthquake_line(quake, user_lat, user_lon);
+            if should_highlight(quake.score, max_score) {
                 lines.push(format!("<span foreground=\"#00FF00\">{}</span>", line));
             } else {
                 lines.push(line);
             }
         }
 
-        lines.push(format!(
-            "\n\n🕐 Updated: {}",
-            time::OffsetDateTime::now_utc()
-                .format(&time::macros::format_description!(
-                    "[year]-[month]-[day] [hour]:[minute]Z"
-                ))
-                .unwrap_or_else(|_| "Unknown".to_string())
-        ));
-
+        lines.push(format_timestamp_footer());
         lines.join("\n")
     }
 }
@@ -161,6 +107,87 @@ impl Default for WaybarFormatter {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Find the maximum score among all earthquakes
+fn find_max_score(earthquakes: &[crate::api::models::Earthquake]) -> f64 {
+    earthquakes
+        .iter()
+        .map(|eq| eq.score)
+        .max_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+        .unwrap_or(0.0)
+}
+
+/// Format day band header based on age
+fn format_day_band_header(day_band: u32) -> String {
+    match day_band {
+        0 => "⏰ Last 24 hours:",
+        1 => "\n⏰ 1-2 days ago:",
+        2 => "\n⏰ 2-4 days ago:",
+        3 => "\n⏰ 4-8 days ago:",
+        _ => "\n⏰ 8+ days ago:",
+    }
+    .to_string()
+}
+
+/// Format a single earthquake line with all details
+fn format_earthquake_line(
+    quake: &crate::api::models::Earthquake,
+    user_lat: f64,
+    user_lon: f64,
+) -> String {
+    let distance = quake.horizontal_distance_from(user_lat, user_lon);
+    let direction = quake.direction_from(user_lat, user_lon);
+    let time_display = format_time(&quake.time);
+    let quality_display = format_quality(&quake.quality);
+
+    format!(
+        "  📅 {} | M{:.1} | 📏 {:.1}km | {}{} {:.0}km | MMI {}",
+        time_display,
+        quake.magnitude,
+        quake.depth,
+        quality_display,
+        direction,
+        distance,
+        quake.mmi.map(|m| m.to_string()).unwrap_or("-".to_string())
+    )
+}
+
+/// Format time string by removing milliseconds and Z suffix
+fn format_time(time: &str) -> String {
+    if let Some(t_pos) = time.find('T') {
+        let time_part = &time[t_pos + 1..];
+        let time_clean = time_part.split('.').next().unwrap_or(time_part);
+        format!("{} {}", &time[..t_pos], time_clean)
+    } else {
+        time.to_string()
+    }
+}
+
+/// Format quality display, hiding "best" to reduce noise
+fn format_quality(quality: &str) -> String {
+    if quality == "best" {
+        String::new()
+    } else {
+        format!("🎯 {} | ", quality)
+    }
+}
+
+/// Check if earthquake score should be highlighted as the highest
+fn should_highlight(score: f64, max_score: f64) -> bool {
+    (score - max_score).abs() < 0.001
+}
+
+/// Format the timestamp footer for the tooltip
+fn format_timestamp_footer() -> String {
+    format!(
+        "\n\n🕐 Updated: {}",
+        time::OffsetDateTime::now_utc()
+            .format(&time::macros::format_description!(
+                "[year]-[month]-[day] [hour]:[minute]Z"
+            ))
+            .unwrap_or_else(|_| "Unknown".to_string())
+    )
 }
 
 /// Get day band for grouping (0=0-1 days, 1=1-2 days, 2=2-4 days, 3=4-8 days, 4=8+ days)

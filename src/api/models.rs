@@ -52,7 +52,8 @@ impl QuakeData {
             .map(|eq| {
                 let age_days = eq.age_in_days();
                 let distance_3d_km = eq.distance_3d_from(user_lat, user_lon);
-                let score = calculate_score(age_days, distance_3d_km, eq.magnitude, eq.mmi.unwrap_or(0));
+                let score =
+                    calculate_score(age_days, distance_3d_km, eq.magnitude, eq.mmi.unwrap_or(0));
                 (eq.clone(), score, age_days)
             })
             .collect();
@@ -158,7 +159,8 @@ impl Earthquake {
     /// Calculate 3D distance from user location using Haversine formula + depth (Pythagorean)
     /// Used for scoring to account for depth
     pub fn distance_3d_from(&self, user_lat: f64, user_lon: f64) -> f64 {
-        let horizontal_distance = haversine_distance(user_lat, user_lon, self.latitude, self.longitude);
+        let horizontal_distance =
+            haversine_distance(user_lat, user_lon, self.latitude, self.longitude);
         // Calculate 3D distance: sqrt(horizontal^2 + depth^2)
         (horizontal_distance.powi(2) + self.depth.powi(2)).sqrt()
     }

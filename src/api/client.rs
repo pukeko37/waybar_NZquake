@@ -62,7 +62,7 @@ impl QuakeClient {
                 depth: feature.properties.depth,
                 quality: feature.properties.quality,
                 mmi: feature.properties.mmi,
-                longitude: feature.geometry.coordinates.get(0).copied().unwrap_or(0.0),
+                longitude: feature.geometry.coordinates.first().copied().unwrap_or(0.0),
                 latitude: feature.geometry.coordinates.get(1).copied().unwrap_or(0.0),
                 score: 0.0,
             })

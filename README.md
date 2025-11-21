@@ -28,8 +28,11 @@ This project provides a Nix flake for reproducible builds and easy integration w
 #### Quick Start with Nix
 
 ```bash
-# Run directly from GitHub
+# Run directly from GitHub (defaults to Wellington)
 nix run github:pukeko37/waybar_nzquake
+
+# Run with custom location
+nix run github:pukeko37/waybar_nzquake -- "-36.8485,174.7633"
 
 # Build locally
 nix build
@@ -98,10 +101,13 @@ The binary will be available at `target/release/waybar_nzquake`.
 
 ## Usage
 
-The program requires a location parameter in latitude,longitude format:
+The program accepts an optional location parameter in latitude,longitude format. If not specified, it defaults to Wellington, New Zealand (-41.2865,174.7762):
 
 ```bash
-# Wellington, New Zealand
+# Use default location (Wellington)
+./target/release/waybar_nzquake
+
+# Wellington, New Zealand (explicit)
 ./target/release/waybar_nzquake "-41.2865,174.7762"
 
 # Auckland, New Zealand
@@ -176,13 +182,13 @@ To use waybar_nzquake in your Waybar setup:
 1. Build the release binary (or install via Nix)
 2. Configure your Waybar to use the binary
 
-Example Waybar config (replace coordinates with your location):
+Example Waybar config (defaults to Wellington, or specify your location):
 
 ```json
 {
     "custom/earthquake": {
         "format": "{}",
-        "exec": "/path/to/waybar_nzquake/target/release/waybar_nzquake '-41.2865,174.7762'",
+        "exec": "/path/to/waybar_nzquake/target/release/waybar_nzquake",
         "interval": 300,
         "return-type": "json"
     }
@@ -195,14 +201,27 @@ Or for Nix users with the package installed:
 {
     "custom/earthquake": {
         "format": "{}",
-        "exec": "waybar_nzquake '-41.2865,174.7762'",
+        "exec": "waybar_nzquake",
         "interval": 300,
         "return-type": "json"
     }
 }
 ```
 
-**Note:** Replace `-41.2865,174.7762` with your actual latitude,longitude. Common NZ locations:
+To specify a custom location, add it as an argument:
+
+```json
+{
+    "custom/earthquake": {
+        "format": "{}",
+        "exec": "waybar_nzquake '-36.8485,174.7633'",
+        "interval": 300,
+        "return-type": "json"
+    }
+}
+```
+
+**Note:** The program defaults to Wellington (-41.2865,174.7762). Common NZ locations:
 - Wellington: `-41.2865,174.7762`
 - Auckland: `-36.8485,174.7633`
 - Christchurch: `-43.5321,172.6362`

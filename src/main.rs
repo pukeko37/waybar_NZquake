@@ -9,10 +9,10 @@ use api::QuakeClient;
 use display::WaybarFormatter;
 
 fn main() -> Result<()> {
-    // Parse command line argument: latitude,longitude
+    // Parse command line argument: latitude,longitude (defaults to Wellington if not provided)
     let location = std::env::args()
         .nth(1)
-        .context("Missing required location argument. Usage: waybar_nzquake <latitude,longitude>")?;
+        .unwrap_or_else(|| "-41.2865,174.7762".to_string());
 
     let (latitude, longitude) = parse_location(&location)?;
 
