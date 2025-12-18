@@ -39,9 +39,10 @@ impl WaybarFormatter {
              \n\
              Last attempt: {}",
             error,
-            time::OffsetDateTime::now_utc()
+            time::OffsetDateTime::now_local()
+                .unwrap_or_else(|_| time::OffsetDateTime::now_utc())
                 .format(&time::macros::format_description!(
-                    "[year]-[month]-[day] [hour]:[minute]Z"
+                    "[year]-[month]-[day] [hour]:[minute]"
                 ))
                 .unwrap_or_else(|_| "Unknown".to_string())
         );
@@ -153,14 +154,34 @@ fn format_earthquake_line(
     )
 }
 
-/// Format time string by removing milliseconds and Z suffix
+/// Format time string by converting from UTC to system local time
 fn format_time(time: &str) -> String {
-    if let Some(t_pos) = time.find('T') {
-        let time_part = &time[t_pos + 1..];
-        let time_clean = time_part.split('.').next().unwrap_or(time_part);
-        format!("{} {}", &time[..t_pos], time_clean)
+    use time::{OffsetDateTime, UtcOffset};
+
+    // Try to parse the ISO 8601 timestamp and convert to local time
+    if let Ok(utc_time) = OffsetDateTime::parse(
+        time,
+        &time::format_description::well_known::Iso8601::DEFAULT,
+    ) {
+        // Get the system's local UTC offset, fallback to UTC if unavailable
+        let local_offset = UtcOffset::current_local_offset().unwrap_or(UtcOffset::UTC);
+        let local_time = utc_time.to_offset(local_offset);
+
+        // Format as YYYY-MM-DD HH:MM:SS
+        local_time
+            .format(&time::macros::format_description!(
+                "[year]-[month]-[day] [hour]:[minute]:[second]"
+            ))
+            .unwrap_or_else(|_| time.to_string())
     } else {
-        time.to_string()
+        // Fallback: just clean up the original string if parsing fails
+        if let Some(t_pos) = time.find('T') {
+            let time_part = &time[t_pos + 1..];
+            let time_clean = time_part.split('.').next().unwrap_or(time_part);
+            format!("{} {}", &time[..t_pos], time_clean)
+        } else {
+            time.to_string()
+        }
     }
 }
 
@@ -182,9 +203,10 @@ fn should_highlight(score: f64, max_score: f64) -> bool {
 fn format_timestamp_footer() -> String {
     format!(
         "\n\n🕐 Updated: {}",
-        time::OffsetDateTime::now_utc()
+        time::OffsetDateTime::now_local()
+            .unwrap_or_else(|_| time::OffsetDateTime::now_utc())
             .format(&time::macros::format_description!(
-                "[year]-[month]-[day] [hour]:[minute]Z"
+                "[year]-[month]-[day] [hour]:[minute]"
             ))
             .unwrap_or_else(|_| "Unknown".to_string())
     )
