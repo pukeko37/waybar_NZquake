@@ -1,0 +1,201 @@
+//! Waybar output formatter for earthquake data.
+
+use crate::app::QuakeFormatter;
+use crate::domain::QuakeData;
+use crate::infra::display::formatting::{
+    day_band_header, find_max_score, format_quality, format_time, format_timestamp_footer,
+    should_highlight,
+};
+use anyhow::Result;
+use serde::Serialize;
+
+/// Waybar JSON output format.
+#[derive(Debug, Serialize)]
+pub struct WaybarOutput {
+    pub text: String,
+    pub tooltip: String,
+}
+
+/// Formatter for creating Waybar JSON output from earthquake data.
+pub struct WaybarFormatter;
+
+impl WaybarFormatter {
+    pub fn new() -> Self {
+        Self
+    }
+
+    /// Format earthquake data into Waybar output.
+    pub fn format(&self, quake_data: &QuakeData) -> Result<WaybarOutput> {
+        let text = self.format_display_text(quake_data);
+        let tooltip = self.format_tooltip(quake_data);
+
+        Ok(WaybarOutput { text, tooltip })
+    }
+
+    /// Create error output for display when earthquake data is unavailable.
+    /// Deliberately infallible — this is the fallback `main` reaches for
+    /// when everything else has already failed, per the Waybar custom-module
+    /// contract's "must emit valid JSON on stdout every invocation" rule.
+    pub fn create_error_output(error: anyhow::Error) -> WaybarOutput {
+        let text = "🌍 -- Earthquake data unavailable".to_string();
+        let tooltip = format!(
+            "Unable to fetch earthquake data\n\
+             \n\
+             Error: {}\n\
+             Service: GeoNet API\n\
+             \n\
+             Last attempt: {}",
+            error,
+            time::OffsetDateTime::now_local()
+                .unwrap_or_else(|_| time::OffsetDateTime::now_utc())
+                .format(&time::macros::format_description!(
+                    "[year]-[month]-[day] [hour]:[minute]"
+                ))
+                .unwrap_or_else(|_| "Unknown".to_string())
+        );
+
+        WaybarOutput { text, tooltip }
+    }
+
+    /// Format the main display text (icon + top earthquake or count).
+    fn format_display_text(&self, quake_data: &QuakeData) -> String {
+        if quake_data.earthquakes.is_empty() {
+            return "🌍 No recent earthquakes".to_string();
+        }
+
+        let count = quake_data.earthquakes.len();
+        let first_quake = &quake_data.earthquakes[0];
+        let distance = first_quake.distance_km(&quake_data.user_location);
+        let direction = first_quake.direction_from(&quake_data.user_location);
+
+        format!(
+            "🌍 M{:.1} {:.0}km {} ({} quakes)",
+            first_quake.magnitude.value(),
+            distance,
+            direction,
+            count
+        )
+    }
+
+    /// Format the detailed tooltip information.
+    fn format_tooltip(&self, quake_data: &QuakeData) -> String {
+        if quake_data.earthquakes.is_empty() {
+            return "No recent earthquakes recorded".to_string();
+        }
+
+        let user_location = quake_data.user_location;
+        let mut lines = vec!["Recent NZ Earthquakes (by day band):\n".to_string()];
+
+        let max_score = find_max_score(&quake_data.earthquakes);
+        let mut current_day_band = None;
+
+        for quake in &quake_data.earthquakes {
+            let day_band = quake.day_band();
+
+            if current_day_band != Some(day_band) {
+                lines.push(day_band_header(day_band).to_string());
+                current_day_band = Some(day_band);
+            }
+
+            let line = format_earthquake_line(quake, &user_location);
+            if should_highlight(quake.score, max_score) {
+                lines.push(format!("<span foreground=\"#00FF00\">{}</span>", line));
+            } else {
+                lines.push(line);
+            }
+        }
+
+        lines.push(format_timestamp_footer());
+        lines.join("\n")
+    }
+}
+
+impl Default for WaybarFormatter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl QuakeFormatter for WaybarFormatter {
+    type Output = WaybarOutput;
+
+    fn format(&self, data: &QuakeData) -> Result<Self::Output, anyhow::Error> {
+        self.format(data)
+    }
+}
+
+/// Format a single earthquake line with all details.
+fn format_earthquake_line(
+    quake: &crate::domain::Earthquake,
+    user_location: &crate::domain::Coordinates,
+) -> String {
+    let distance = quake.distance_km(user_location);
+    let direction = quake.direction_from(user_location);
+    let time_display = format_time(&quake.time);
+    let quality_display = format_quality(quake.quality);
+
+    format!(
+        "  📅 {} | M{:.1} | 📏 {:.1}km | {}{} {:.0}km | MMI {}",
+        time_display,
+        quake.magnitude.value(),
+        quake.depth.value(),
+        quality_display,
+        direction,
+        distance,
+        quake.mmi.map(|m| m.value().to_string()).unwrap_or_else(|| "-".to_string())
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::domain::{Coordinates, Latitude, Longitude, Magnitude, Depth, QuakeQuality, QuakeTime, Earthquake};
+
+    fn wellington() -> Coordinates {
+        Coordinates::new(
+            Latitude::new(-41.2865).unwrap(),
+            Longitude::new(174.7762).unwrap(),
+        )
+    }
+
+    fn sample_quake() -> Earthquake {
+        Earthquake {
+            time: QuakeTime::parse("2024-01-13T14:30:00.000Z").unwrap(),
+            magnitude: Magnitude::new(5.2).unwrap(),
+            depth: Depth::new(12.0).unwrap(),
+            quality: QuakeQuality::Best,
+            mmi: None,
+            epicenter: wellington(),
+            score: 1.0,
+        }
+    }
+
+    #[test]
+    fn test_empty_earthquakes_output() {
+        let data = QuakeData {
+            earthquakes: vec![],
+            user_location: wellington(),
+        };
+        let output = WaybarFormatter::new().format(&data).unwrap();
+        assert!(output.text.contains("No recent earthquakes"));
+        assert!(output.tooltip.contains("No recent earthquakes recorded"));
+    }
+
+    #[test]
+    fn test_display_text_with_earthquake() {
+        let data = QuakeData {
+            earthquakes: vec![sample_quake()],
+            user_location: wellington(),
+        };
+        let output = WaybarFormatter::new().format(&data).unwrap();
+        assert!(output.text.contains("M5.2"));
+        assert!(output.text.contains("1 quakes"));
+    }
+
+    #[test]
+    fn test_error_output_formatting() {
+        let error_output = WaybarFormatter::create_error_output(anyhow::anyhow!("Test error"));
+        assert!(error_output.text.contains("unavailable"));
+        assert!(error_output.tooltip.contains("Test error"));
+    }
+}
