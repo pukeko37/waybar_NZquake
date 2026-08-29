@@ -52,6 +52,19 @@ pub fn find_max_local_mmi(earthquakes: &[Earthquake]) -> f64 {
         .unwrap_or(0.0)
 }
 
+/// Find the most recent earthquake — bar text leads with this one, per
+/// [[quake-tooltip-display-order]]. Order-independent: scans by age rather
+/// than assuming any particular list order, since storage order is grouped
+/// by day band/time, not guaranteed to put the latest quake first or last.
+pub fn find_latest_quake(earthquakes: &[Earthquake]) -> Option<&Earthquake> {
+    earthquakes.iter().min_by(|a, b| {
+        a.time
+            .age_in_days()
+            .partial_cmp(&b.time.age_in_days())
+            .unwrap_or(std::cmp::Ordering::Equal)
+    })
+}
+
 /// Format the "Updated: …" trailer shown at the end of the tooltip.
 pub fn format_timestamp_footer() -> String {
     format!(

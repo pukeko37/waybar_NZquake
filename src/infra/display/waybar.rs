@@ -3,8 +3,8 @@
 use crate::app::QuakeFormatter;
 use crate::domain::QuakeData;
 use crate::infra::display::formatting::{
-    day_band_header, find_max_local_mmi, format_quality, format_time, format_timestamp_footer,
-    should_highlight,
+    day_band_header, find_latest_quake, find_max_local_mmi, format_quality, format_time,
+    format_timestamp_footer, should_highlight,
 };
 use anyhow::Result;
 use serde::Serialize;
@@ -57,21 +57,25 @@ impl WaybarFormatter {
         WaybarOutput { text, tooltip }
     }
 
-    /// Format the main display text (icon + top earthquake or count).
+    /// Format the main display text (icon + latest earthquake or count).
     fn format_display_text(&self, quake_data: &QuakeData) -> String {
         if quake_data.earthquakes.is_empty() {
             return "🌍 No recent earthquakes".to_string();
         }
 
         let count = quake_data.earthquakes.len();
-        let first_quake = &quake_data.earthquakes[0];
-        let distance = first_quake.distance_km(&quake_data.user_location);
-        let direction = first_quake.direction_from(&quake_data.user_location);
+        // Latest by time, not `[0]` — storage order is day-band/time-grouped
+        // for the tooltip, not MMI-ranked, so list position no longer picks
+        // out any particular quake. See [[quake-tooltip-display-order]].
+        let latest_quake = find_latest_quake(&quake_data.earthquakes)
+            .expect("checked non-empty above, so a maximum exists");
+        let distance = latest_quake.distance_km(&quake_data.user_location);
+        let direction = latest_quake.direction_from(&quake_data.user_location);
 
         format!(
             "🌍 M{:.1} MMI{:.1} {:.0}km {} ({} quakes)",
-            first_quake.magnitude.value(),
-            first_quake.local_mmi.value(),
+            latest_quake.magnitude.value(),
+            latest_quake.local_mmi.value(),
             distance,
             direction,
             count
@@ -179,6 +183,26 @@ mod tests {
         }
     }
 
+    /// A quake `age_days` old, so tests can exercise day-band grouping and
+    /// latest-quake selection — `sample_quake` above is fixed at a real
+    /// past date, which is no use for "is this the most recent one" tests.
+    fn aged_quake(local_mmi: f64, age_days: f64) -> Earthquake {
+        let timestamp =
+            time::OffsetDateTime::now_utc() - time::Duration::seconds((age_days * 86400.0) as i64);
+        let formatted = timestamp
+            .format(&time::format_description::well_known::Iso8601::DEFAULT)
+            .expect("OffsetDateTime always formats as ISO-8601");
+        Earthquake {
+            time: QuakeTime::parse(&formatted).expect("just-formatted timestamp always reparses"),
+            magnitude: Magnitude::new(5.0).unwrap(),
+            depth: Depth::new(12.0).unwrap(),
+            quality: QuakeQuality::Best,
+            mmi: None,
+            epicenter: wellington(),
+            local_mmi: LocalMmi::new(local_mmi).unwrap(),
+        }
+    }
+
     #[test]
     fn test_empty_earthquakes_output() {
         let data = QuakeData {
@@ -221,6 +245,43 @@ mod tests {
         };
         let output = WaybarFormatter::new().format(&data).unwrap();
         assert!(output.tooltip.contains("MMI 4.2 local (GeoNet: MMI6)"));
+    }
+
+    #[test]
+    fn test_display_text_shows_latest_quake_not_highest_mmi() {
+        // Per quake-tooltip-display-order: bar text leads with the most
+        // recent quake, even when an older one has higher local_mmi.
+        let data = QuakeData {
+            earthquakes: vec![aged_quake(8.0, 5.0), aged_quake(3.0, 0.1)],
+            user_location: wellington(),
+        };
+        let output = WaybarFormatter::new().format(&data).unwrap();
+        assert!(output.text.contains("MMI3.0"));
+    }
+
+    #[test]
+    fn test_tooltip_day_band_headers_appear_once_each_in_chronological_order() {
+        // Input deliberately out of any useful order — the formatter must
+        // not rely on caller ordering, only on `day_band()` grouping
+        // correctly once QuakeData::score_and_filter has sorted it. Here we
+        // hand the formatter an already-correctly-sorted list directly
+        // (its own contract), and check no header repeats and they read
+        // most-recent-band-first.
+        let data = QuakeData {
+            earthquakes: vec![
+                aged_quake(5.0, 0.5), // Today
+                aged_quake(5.0, 0.2), // Today
+                aged_quake(5.0, 5.0), // FourToEightDays
+            ],
+            user_location: wellington(),
+        };
+        let output = WaybarFormatter::new().format(&data).unwrap();
+
+        let today_pos = output.tooltip.find("Last 24 hours").unwrap();
+        let later_pos = output.tooltip.find("4-8 days ago").unwrap();
+        assert!(today_pos < later_pos);
+        assert_eq!(output.tooltip.matches("Last 24 hours").count(), 1);
+        assert_eq!(output.tooltip.matches("4-8 days ago").count(), 1);
     }
 
     #[test]

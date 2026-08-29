@@ -21,8 +21,10 @@ pub struct Earthquake {
     pub epicenter: Coordinates,
     /// Estimated MMI at the user's reference location, written by
     /// `QuakeData::score_and_filter`; `0.0` until then. Always present
-    /// (unlike `mmi`) — this is what ranks and retains quakes, and what the
-    /// display layer leads with.
+    /// (unlike `mmi`) — this is what retains quakes (via decayed
+    /// significance) and what the tooltip highlights the top entry by; bar
+    /// text leads with the latest quake by time instead, see
+    /// [[quake-tooltip-display-order]].
     pub local_mmi: LocalMmi,
 }
 
@@ -93,11 +95,13 @@ impl QuakeData {
     /// Compute each quake's local MMI, retain the last
     /// [`MAX_RETAINED_AGE_DAYS`] days' worth by decayed significance
     /// (floor [`MIN_RETAINED_COUNT`], ceiling [`MAX_RETAINED_COUNT`]), and
-    /// sort the retained set by raw local MMI, descending — see
-    /// [[quake-significance-metric]] in the project wiki. Consumes `self`
-    /// and returns a new `QuakeData` rather than mutating in place, per
-    /// house style's preference for functional transformation over
-    /// mutation.
+    /// sort the retained set by day band ascending (most recent band
+    /// first), then quake time ascending within a band — see
+    /// [[quake-tooltip-display-order]], superseding
+    /// [[quake-significance-metric]]'s original "raw local MMI, descending"
+    /// display order. Consumes `self` and returns a new `QuakeData` rather
+    /// than mutating in place, per house style's preference for functional
+    /// transformation over mutation.
     pub fn score_and_filter(self) -> Self {
         let user_location = self.user_location;
 
@@ -137,11 +141,17 @@ impl QuakeData {
             .map(|(eq, _)| eq)
             .collect();
 
+        // Day band ascending (`Today` first — most recent band first), then
+        // quake time ascending within a band (oldest first) — see
+        // [[quake-tooltip-display-order]]. `local_mmi` no longer determines
+        // storage order; retention above already used it via `S(t)`.
         earthquakes.sort_by(|a, b| {
-            b.local_mmi
-                .value()
-                .partial_cmp(&a.local_mmi.value())
-                .unwrap_or(std::cmp::Ordering::Equal)
+            a.day_band().cmp(&b.day_band()).then_with(|| {
+                b.time
+                    .age_in_days()
+                    .partial_cmp(&a.time.age_in_days())
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
         });
 
         Self {
@@ -300,25 +310,46 @@ mod tests {
     }
 
     #[test]
-    fn test_score_and_filter_sorts_by_local_mmi_descending() {
+    fn test_score_and_filter_sorts_by_day_band_ascending_most_recent_first() {
+        // Per quake-tooltip-display-order: day band ascending (Today
+        // first), not local_mmi. High-MMI old quake vs. low-MMI new quake —
+        // the new one must still lead, which the old MMI-descending sort
+        // would have gotten backwards.
         let data = QuakeData {
             earthquakes: vec![
-                sample_quake(4.0, QuakeQuality::Best, 0.0),
-                sample_quake(7.0, QuakeQuality::Best, 0.0),
-                sample_quake(5.5, QuakeQuality::Best, 0.0),
+                sample_quake(8.0, QuakeQuality::Best, 10.0), // high MMI, old
+                sample_quake(3.0, QuakeQuality::Best, 0.5),  // low MMI, today
             ],
             user_location: wellington(),
         };
 
         let filtered = data.score_and_filter();
-        let mmis: Vec<f64> = filtered
+        let bands: Vec<_> = filtered
             .earthquakes
             .iter()
-            .map(|eq| eq.local_mmi.value())
+            .map(|eq| eq.day_band())
             .collect();
-        let mut sorted_desc = mmis.clone();
-        sorted_desc.sort_by(|a, b| b.partial_cmp(a).unwrap());
-        assert_eq!(mmis, sorted_desc);
+        let mut sorted_asc = bands.clone();
+        sorted_asc.sort();
+        assert_eq!(bands, sorted_asc);
+    }
+
+    #[test]
+    fn test_score_and_filter_sorts_ascending_by_time_within_a_band() {
+        // Same day band (Today), different ages — must come out oldest
+        // first (ascending date order within a band).
+        let data = QuakeData {
+            earthquakes: vec![
+                sample_quake(5.0, QuakeQuality::Best, 0.1), // newer
+                sample_quake(5.0, QuakeQuality::Best, 0.8), // older
+            ],
+            user_location: wellington(),
+        };
+
+        let filtered = data.score_and_filter();
+        assert!(
+            filtered.earthquakes[0].time.age_in_days() > filtered.earthquakes[1].time.age_in_days()
+        );
     }
 
     #[test]
