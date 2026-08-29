@@ -129,7 +129,20 @@ impl QuakeFormatter for WaybarFormatter {
     }
 }
 
-/// Format a single earthquake line with all details.
+/// Format a single earthquake entry across two lines.
+///
+/// GTK3's tooltip label wraps a single long logical line by its own Pango
+/// wrap-width calculation, which isn't governed by CSS `min-width`/
+/// `max-width` on a wrapping label — a documented GTK3 limitation, not a
+/// styling gap. The single-line format this replaced ran to ~85 rendered
+/// columns once the two emoji (which render wider than a normal glyph) are
+/// counted, which was enough to wrap mid-field on some entries (observed:
+/// the trailing distance, e.g. "144km", dropping to its own line). Splitting
+/// at a fixed point — date/time alone on the first line, everything else
+/// indented on the second — keeps both lines well under that threshold
+/// regardless of field content. Field set and lead field are unchanged;
+/// only the line break is new — see `display-module-rules`' "field order
+/// and separators are an implementation choice" note.
 fn format_earthquake_line(
     quake: &crate::domain::Earthquake,
     user_location: &crate::domain::Coordinates,
@@ -144,7 +157,7 @@ fn format_earthquake_line(
         .unwrap_or_default();
 
     format!(
-        "  📅 {} | M{:.1} | MMI {:.1} local{} | 📏 {:.1}km | {}{} {:.0}km",
+        "  📅 {}\n      M{:.1} | MMI {:.1} local{} | 📏 {:.1}km | {}{} {:.0}km",
         time_display,
         quake.magnitude.value(),
         quake.local_mmi.value(),
@@ -224,6 +237,25 @@ mod tests {
         assert!(output.text.contains("M5.2"));
         assert!(output.text.contains("MMI4.2"));
         assert!(output.text.contains("1 quakes"));
+    }
+
+    #[test]
+    fn test_tooltip_quake_entry_splits_date_onto_its_own_line() {
+        // GTK3's tooltip label wraps a long single logical line at its own
+        // Pango-computed point, ignoring CSS width — splitting the date
+        // onto its own line keeps every line well under the width that
+        // triggered it (observed: the trailing distance field wrapping).
+        // See format_earthquake_line's doc comment.
+        let data = QuakeData {
+            earthquakes: vec![sample_quake(None)],
+            user_location: wellington(),
+        };
+        let output = WaybarFormatter::new().format(&data).unwrap();
+        // Don't assert the exact local-time string (depends on the test
+        // machine's timezone) — just that a newline separates the date
+        // segment from the rest of the fields, indented on its own line.
+        assert!(output.tooltip.contains("📅 "));
+        assert!(output.tooltip.contains("\n      M5.2"));
     }
 
     #[test]
