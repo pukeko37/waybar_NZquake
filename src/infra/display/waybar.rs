@@ -3,7 +3,7 @@
 use crate::app::QuakeFormatter;
 use crate::domain::QuakeData;
 use crate::infra::display::formatting::{
-    day_band_header, find_max_score, format_quality, format_time, format_timestamp_footer,
+    day_band_header, find_max_local_mmi, format_quality, format_time, format_timestamp_footer,
     should_highlight,
 };
 use anyhow::Result;
@@ -69,8 +69,9 @@ impl WaybarFormatter {
         let direction = first_quake.direction_from(&quake_data.user_location);
 
         format!(
-            "🌍 M{:.1} {:.0}km {} ({} quakes)",
+            "🌍 M{:.1} MMI{:.1} {:.0}km {} ({} quakes)",
             first_quake.magnitude.value(),
+            first_quake.local_mmi.value(),
             distance,
             direction,
             count
@@ -86,7 +87,7 @@ impl WaybarFormatter {
         let user_location = quake_data.user_location;
         let mut lines = vec!["Recent NZ Earthquakes (by day band):\n".to_string()];
 
-        let max_score = find_max_score(&quake_data.earthquakes);
+        let max_local_mmi = find_max_local_mmi(&quake_data.earthquakes);
         let mut current_day_band = None;
 
         for quake in &quake_data.earthquakes {
@@ -98,7 +99,7 @@ impl WaybarFormatter {
             }
 
             let line = format_earthquake_line(quake, &user_location);
-            if should_highlight(quake.score, max_score) {
+            if should_highlight(quake.local_mmi.value(), max_local_mmi) {
                 lines.push(format!("<span foreground=\"#00FF00\">{}</span>", line));
             } else {
                 lines.push(line);
@@ -133,23 +134,31 @@ fn format_earthquake_line(
     let direction = quake.direction_from(user_location);
     let time_display = format_time(&quake.time);
     let quality_display = format_quality(quake.quality);
+    let geonet_mmi_aside = quake
+        .mmi
+        .map(|m| format!(" (GeoNet: MMI{})", m.value()))
+        .unwrap_or_default();
 
     format!(
-        "  📅 {} | M{:.1} | 📏 {:.1}km | {}{} {:.0}km | MMI {}",
+        "  📅 {} | M{:.1} | MMI {:.1} local{} | 📏 {:.1}km | {}{} {:.0}km",
         time_display,
         quake.magnitude.value(),
+        quake.local_mmi.value(),
+        geonet_mmi_aside,
         quake.depth.value(),
         quality_display,
         direction,
         distance,
-        quake.mmi.map(|m| m.value().to_string()).unwrap_or_else(|| "-".to_string())
     )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::{Coordinates, Latitude, Longitude, Magnitude, Depth, QuakeQuality, QuakeTime, Earthquake};
+    use crate::domain::{
+        Coordinates, Depth, Earthquake, Latitude, LocalMmi, Longitude, Magnitude, Mmi,
+        QuakeQuality, QuakeTime,
+    };
 
     fn wellington() -> Coordinates {
         Coordinates::new(
@@ -158,15 +167,15 @@ mod tests {
         )
     }
 
-    fn sample_quake() -> Earthquake {
+    fn sample_quake(mmi: Option<Mmi>) -> Earthquake {
         Earthquake {
             time: QuakeTime::parse("2024-01-13T14:30:00.000Z").unwrap(),
             magnitude: Magnitude::new(5.2).unwrap(),
             depth: Depth::new(12.0).unwrap(),
             quality: QuakeQuality::Best,
-            mmi: None,
+            mmi,
             epicenter: wellington(),
-            score: 1.0,
+            local_mmi: LocalMmi::new(4.2).unwrap(),
         }
     }
 
@@ -184,12 +193,34 @@ mod tests {
     #[test]
     fn test_display_text_with_earthquake() {
         let data = QuakeData {
-            earthquakes: vec![sample_quake()],
+            earthquakes: vec![sample_quake(None)],
             user_location: wellington(),
         };
         let output = WaybarFormatter::new().format(&data).unwrap();
         assert!(output.text.contains("M5.2"));
+        assert!(output.text.contains("MMI4.2"));
         assert!(output.text.contains("1 quakes"));
+    }
+
+    #[test]
+    fn test_tooltip_shows_local_mmi_and_omits_geonet_mmi_when_absent() {
+        let data = QuakeData {
+            earthquakes: vec![sample_quake(None)],
+            user_location: wellington(),
+        };
+        let output = WaybarFormatter::new().format(&data).unwrap();
+        assert!(output.tooltip.contains("MMI 4.2 local"));
+        assert!(!output.tooltip.contains("GeoNet:"));
+    }
+
+    #[test]
+    fn test_tooltip_shows_geonet_mmi_as_aside_when_present() {
+        let data = QuakeData {
+            earthquakes: vec![sample_quake(Mmi::new(6).ok())],
+            user_location: wellington(),
+        };
+        let output = WaybarFormatter::new().format(&data).unwrap();
+        assert!(output.tooltip.contains("MMI 4.2 local (GeoNet: MMI6)"));
     }
 
     #[test]

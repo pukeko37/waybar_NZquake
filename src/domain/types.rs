@@ -85,13 +85,26 @@ impl RangeValidated<f64> for DepthRange {
     const UNIT: &'static str = "km";
 }
 
-/// Modified Mercalli Intensity range (0 to 12).
+/// Modified Mercalli Intensity range (0 to 12), as GeoNet reports it.
 #[derive(Debug, Clone, Copy)]
 pub struct MmiRange;
 impl RangeValidated<i32> for MmiRange {
     const MIN: i32 = 0;
     const MAX: i32 = 12;
     const UNIT: &'static str = "MMI";
+}
+
+/// Locally-derived MMI range, same 0..=12 scale as `MmiRange` but continuous
+/// (f64) rather than integer — the Dowrick & Rhoades attenuation formula
+/// this backs produces fractional intensities, and the tooltip displays one
+/// decimal place, so `MmiRange`'s integer `Mmi` isn't the right fit despite
+/// the shared scale. See [[quake-significance-metric]] in the project wiki.
+#[derive(Debug, Clone, Copy)]
+pub struct LocalMmiRange;
+impl RangeValidated<f64> for LocalMmiRange {
+    const MIN: f64 = 0.0;
+    const MAX: f64 = 12.0;
+    const UNIT: &'static str = "MMI (local)";
 }
 
 /// Latitude range, globally valid (not NZ-specific — see main.rs for the
@@ -122,6 +135,10 @@ pub type Depth = RangeValidatedValue<f64, DepthRange>;
 /// Modified Mercalli Intensity with validation. Not every quake carries one
 /// — callers use `Option<Mmi>`.
 pub type Mmi = RangeValidatedValue<i32, MmiRange>;
+
+/// Locally-derived MMI with validation — always present (unlike `Mmi`,
+/// which mirrors GeoNet's own sporadically-supplied reading).
+pub type LocalMmi = RangeValidatedValue<f64, LocalMmiRange>;
 
 /// Latitude with validation.
 pub type Latitude = RangeValidatedValue<f64, LatitudeRange>;
@@ -230,14 +247,21 @@ impl fmt::Display for CompassDirection {
 
 // === Day Band ===
 
-/// Groups earthquakes by age for tooltip display and scoring priority.
+/// Groups earthquakes by age for tooltip display, extended to six bands to
+/// match the 32-day retention window (see [[quake-significance-metric]]).
+/// `from_age_days` is total over `0..=32` days — the retention step in
+/// `QuakeData::score_and_filter` is what guarantees every quake reaching
+/// display is within that window; a caller invoking this on an older
+/// timestamp will get `SixteenToThirtyTwoDays` rather than a dedicated
+/// "older" band, since there no longer is one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum DayBand {
     Today,
     OneToTwoDays,
     TwoToFourDays,
     FourToEightDays,
-    Older,
+    EightToSixteenDays,
+    SixteenToThirtyTwoDays,
 }
 
 impl DayBand {
@@ -250,8 +274,10 @@ impl DayBand {
             Self::TwoToFourDays
         } else if age_days < 8.0 {
             Self::FourToEightDays
+        } else if age_days < 16.0 {
+            Self::EightToSixteenDays
         } else {
-            Self::Older
+            Self::SixteenToThirtyTwoDays
         }
     }
 }
@@ -302,9 +328,12 @@ pub struct QuakeTime(OffsetDateTime);
 impl QuakeTime {
     /// Parse an ISO-8601 timestamp as GeoNet emits it.
     pub fn parse(value: &str) -> Result<Self, QuakeError> {
-        OffsetDateTime::parse(value, &time::format_description::well_known::Iso8601::DEFAULT)
-            .map(Self)
-            .map_err(|_| QuakeError::InvalidTimestamp(value.to_string()))
+        OffsetDateTime::parse(
+            value,
+            &time::format_description::well_known::Iso8601::DEFAULT,
+        )
+        .map(Self)
+        .map_err(|_| QuakeError::InvalidTimestamp(value.to_string()))
     }
 
     /// Age of this timestamp in days, relative to now. Non-deterministic by
@@ -327,10 +356,7 @@ mod tests {
 
     #[test]
     fn test_zero_cost_abstractions() {
-        assert_eq!(
-            std::mem::size_of::<Magnitude>(),
-            std::mem::size_of::<f64>()
-        );
+        assert_eq!(std::mem::size_of::<Magnitude>(), std::mem::size_of::<f64>());
         assert_eq!(std::mem::size_of::<Depth>(), std::mem::size_of::<f64>());
         assert_eq!(std::mem::size_of::<Mmi>(), std::mem::size_of::<i32>());
     }
@@ -369,7 +395,10 @@ mod tests {
     #[test]
     fn test_quake_quality_parse() {
         assert_eq!(QuakeQuality::parse("best").unwrap(), QuakeQuality::Best);
-        assert_eq!(QuakeQuality::parse("deleted").unwrap(), QuakeQuality::Deleted);
+        assert_eq!(
+            QuakeQuality::parse("deleted").unwrap(),
+            QuakeQuality::Deleted
+        );
         assert!(QuakeQuality::parse("unknown").is_err());
     }
 
@@ -387,13 +416,17 @@ mod tests {
         assert_eq!(DayBand::from_age_days(1.5), DayBand::OneToTwoDays);
         assert_eq!(DayBand::from_age_days(3.0), DayBand::TwoToFourDays);
         assert_eq!(DayBand::from_age_days(6.0), DayBand::FourToEightDays);
-        assert_eq!(DayBand::from_age_days(30.0), DayBand::Older);
+        assert_eq!(DayBand::from_age_days(12.0), DayBand::EightToSixteenDays);
+        assert_eq!(
+            DayBand::from_age_days(30.0),
+            DayBand::SixteenToThirtyTwoDays
+        );
     }
 
     #[test]
     fn test_day_band_ordering() {
         assert!(DayBand::Today < DayBand::OneToTwoDays);
-        assert!(DayBand::OneToTwoDays < DayBand::Older);
+        assert!(DayBand::EightToSixteenDays < DayBand::SixteenToThirtyTwoDays);
     }
 
     #[test]

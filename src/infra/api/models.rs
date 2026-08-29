@@ -6,7 +6,8 @@
 //! to our domain models.
 
 use crate::domain::{
-    Coordinates, Depth, Earthquake, Latitude, Longitude, Magnitude, Mmi, QuakeQuality, QuakeTime,
+    Coordinates, Depth, Earthquake, Latitude, LocalMmi, Longitude, Magnitude, Mmi, QuakeQuality,
+    QuakeTime,
 };
 use anyhow::{Context, Result};
 use serde::Deserialize;
@@ -83,7 +84,11 @@ impl TryFrom<QuakeFeatureApi> for Earthquake {
             quality,
             mmi,
             epicenter: Coordinates::new(latitude, longitude),
-            score: 0.0,
+            // Written by `QuakeData::score_and_filter`; not yet computed at
+            // parse time, so 0.0 is a harmless placeholder (never in range
+            // to survive filtering as-is, since retention only happens
+            // after score_and_filter recomputes this properly).
+            local_mmi: LocalMmi::new(0.0).expect("0.0 is within LocalMmiRange"),
         })
     }
 }

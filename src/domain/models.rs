@@ -2,7 +2,7 @@
 //! scoring/filtering business logic that ranks and trims them.
 
 use super::types::{
-    bearing_between, haversine_distance, CompassDirection, Coordinates, DayBand, Depth,
+    bearing_between, haversine_distance, CompassDirection, Coordinates, DayBand, Depth, LocalMmi,
     Magnitude, Mmi, QuakeQuality, QuakeTime,
 };
 
@@ -13,12 +13,17 @@ pub struct Earthquake {
     pub magnitude: Magnitude,
     pub depth: Depth,
     pub quality: QuakeQuality,
+    /// GeoNet's own reported MMI, when it supplies one — the intensity at
+    /// this quake's own strongest point, not specifically at the user's
+    /// location. Distinct from `local_mmi`; see [[quake-significance-metric]]
+    /// in the project wiki for why both are kept.
     pub mmi: Option<Mmi>,
     pub epicenter: Coordinates,
-    /// Ranking score written by `QuakeData::score_and_filter`; `0.0` until
-    /// then. Not independently validated — it's a derived internal metric,
-    /// not domain input, so a bare `f64` is enough.
-    pub score: f64,
+    /// Estimated MMI at the user's reference location, written by
+    /// `QuakeData::score_and_filter`; `0.0` until then. Always present
+    /// (unlike `mmi`) — this is what ranks and retains quakes, and what the
+    /// display layer leads with.
+    pub local_mmi: LocalMmi,
 }
 
 impl Earthquake {
@@ -54,34 +59,90 @@ pub struct QuakeData {
     pub user_location: Coordinates,
 }
 
+/// Half-life, in days, of a quake's retention significance — also the
+/// window's outer edge, by construction: a quake at `MIN_SURVIVING_MMI`
+/// today decays to exactly `RETENTION_THRESHOLD` at this many days old. See
+/// [[quake-significance-metric]] in the project wiki for the reasoning.
+const SIGNIFICANCE_HALF_LIFE_DAYS: f64 = 32.0;
+
+/// A quake at or below this local MMI today is already at (or below) the
+/// retention threshold and never enters the retained set.
+const MIN_SURVIVING_MMI: f64 = 4.0;
+
+/// Retained while `local_mmi * 0.5^(age_days / SIGNIFICANCE_HALF_LIFE_DAYS)`
+/// is at or above this. Derived, not independently chosen: half of
+/// `MIN_SURVIVING_MMI`, which is what makes the half-life above exactly
+/// equal to the 32-day retention window.
+const RETENTION_THRESHOLD: f64 = MIN_SURVIVING_MMI / 2.0;
+
+/// Hard outer edge of the retention window, in days. Independent of decay —
+/// a quake older than this is dropped regardless of how significant it
+/// still reads, since there's no day-band bracket beyond it to show it in.
+const MAX_RETAINED_AGE_DAYS: f64 = 32.0;
+
+/// Retained-set size floor: backfill with the next-highest-significance
+/// quakes below `RETENTION_THRESHOLD` if fewer than this many clear it, so a
+/// quiet month doesn't produce a near-empty tooltip.
+const MIN_RETAINED_COUNT: usize = 10;
+
+/// Retained-set size ceiling, applied after sorting by significance
+/// descending — the lowest-significance excess is dropped.
+const MAX_RETAINED_COUNT: usize = 15;
+
 impl QuakeData {
-    /// Score, sort, and filter earthquakes based on recency, proximity, and
-    /// intensity. Keeps the top 8, grouped by day band and sorted by score
-    /// within each band. Consumes `self` and returns a new `QuakeData`
-    /// rather than mutating in place, per house style's preference for
-    /// functional transformation over mutation.
+    /// Compute each quake's local MMI, retain the last
+    /// [`MAX_RETAINED_AGE_DAYS`] days' worth by decayed significance
+    /// (floor [`MIN_RETAINED_COUNT`], ceiling [`MAX_RETAINED_COUNT`]), and
+    /// sort the retained set by raw local MMI, descending — see
+    /// [[quake-significance-metric]] in the project wiki. Consumes `self`
+    /// and returns a new `QuakeData` rather than mutating in place, per
+    /// house style's preference for functional transformation over
+    /// mutation.
     pub fn score_and_filter(self) -> Self {
         let user_location = self.user_location;
 
-        let mut scored: Vec<Earthquake> = self
+        let mut candidates: Vec<(Earthquake, f64)> = self
             .earthquakes
             .into_iter()
-            .filter(|eq| eq.quality != QuakeQuality::Deleted && eq.magnitude.value() >= 3.0)
-            .map(|mut eq| {
+            .filter(|eq| eq.quality != QuakeQuality::Deleted)
+            .filter_map(|mut eq| {
                 let age_days = eq.time.age_in_days();
-                let distance_3d_km = eq.distance_3d_km(&user_location);
-                eq.score = calculate_score(age_days, distance_3d_km, eq.magnitude, eq.mmi);
-                eq
+                if age_days > MAX_RETAINED_AGE_DAYS {
+                    return None;
+                }
+
+                let distance_km = eq.distance_km(&user_location);
+                eq.local_mmi =
+                    calculate_local_mmi(eq.depth.value(), distance_km, eq.magnitude.value());
+
+                let significance =
+                    eq.local_mmi.value() * 0.5_f64.powf(age_days / SIGNIFICANCE_HALF_LIFE_DAYS);
+                Some((eq, significance))
             })
             .collect();
 
-        scored.sort_by(|a, b| {
-            a.day_band()
-                .cmp(&b.day_band())
-                .then_with(|| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal))
-        });
+        candidates.sort_by(|(_, a), (_, b)| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
 
-        let earthquakes = scored.into_iter().take(8).collect();
+        let above_threshold = candidates
+            .iter()
+            .filter(|(_, significance)| *significance >= RETENTION_THRESHOLD)
+            .count();
+        let take_count = above_threshold
+            .clamp(MIN_RETAINED_COUNT, MAX_RETAINED_COUNT)
+            .min(candidates.len());
+
+        let mut earthquakes: Vec<Earthquake> = candidates
+            .into_iter()
+            .take(take_count)
+            .map(|(eq, _)| eq)
+            .collect();
+
+        earthquakes.sort_by(|a, b| {
+            b.local_mmi
+                .value()
+                .partial_cmp(&a.local_mmi.value())
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
 
         Self {
             earthquakes,
@@ -90,24 +151,46 @@ impl QuakeData {
     }
 }
 
-/// Score = log(recency) + log(proximity) + magnitude*2 + MMI, matching the
-/// original hand-tuned weighting: recency and proximity are logarithmically
-/// decayed against an 8-day / 320km baseline, magnitude is weighted x2
-/// (already logarithmic on the Richter scale), and MMI (also logarithmic)
-/// is added as-is.
-fn calculate_score(age_days: f64, distance_3d_km: f64, magnitude: Magnitude, mmi: Option<Mmi>) -> f64 {
-    let max_age = 8.0;
-    let recency = (max_age - age_days).max(0.1); // avoid log(0)
-    let recency_score = recency.log2();
+/// Estimate local MMI at a distance of `distance_km` from a quake of
+/// `magnitude` and `depth_km`, per Dowrick & Rhoades (2005) — Model 2 (Main
+/// Seismic Region) for `depth_km < 70`, Model 3 (Deep region) otherwise.
+/// GeoNet's reported magnitude is used as `Mw` directly, with no correction.
+/// Model 2's crustal-indicator term is approximated from depth alone (GeoNet
+/// exposes no tectonic-type classification): `depth_km < 40` is treated as
+/// Crustal, `40..70` as not. This is a deliberately simple approximation,
+/// not a reproduction of GeoNet's own (much heavier) tectonic-weighting
+/// method — see [[quake-significance-metric]] and [[tectonic-type-approximation]]
+/// in the project wiki for the sourced reasoning and the alternatives ruled
+/// out. Result is clamped into `LocalMmiRange` — the raw formula can exceed
+/// 0..=12 at extreme distance or magnitude, which the papers' own models
+/// don't otherwise bound.
+fn calculate_local_mmi(depth_km: f64, distance_km: f64, magnitude: f64) -> LocalMmi {
+    const DEEP_THRESHOLD_KM: f64 = 70.0;
+    const CRUSTAL_THRESHOLD_KM: f64 = 40.0;
+    const MODEL2_SMOOTHING_KM: f64 = 11.78;
+    const CRUSTAL_BONUS: f64 = 0.409;
+    // Avoids log10(0) = -inf for a quake directly beneath the reference
+    // point; has no other effect (D and 0.1km apart are indistinguishable
+    // for these formulas at NZ-realistic magnitudes).
+    let safe_distance_km = distance_km.max(0.1);
 
-    let max_distance = 320.0;
-    let proximity = (max_distance - distance_3d_km).max(0.1); // avoid log(0)
-    let proximity_score = proximity.log2();
+    let raw = if depth_km >= DEEP_THRESHOLD_KM {
+        3.76 + 1.48 * magnitude - 3.50 * safe_distance_km.log10() + 0.0031 * depth_km
+    } else {
+        let smoothed_distance = (safe_distance_km.powi(3) + MODEL2_SMOOTHING_KM.powi(3)).cbrt();
+        let crustal_bonus = if depth_km < CRUSTAL_THRESHOLD_KM {
+            CRUSTAL_BONUS
+        } else {
+            0.0
+        };
+        4.40 + 1.26 * magnitude - 3.67 * smoothed_distance.log10()
+            + 0.012 * depth_km
+            + crustal_bonus
+    };
 
-    let magnitude_score = magnitude.value() * 2.0;
-    let mmi_score = mmi.map(|m| m.value() as f64).unwrap_or(0.0);
-
-    recency_score + proximity_score + magnitude_score + mmi_score
+    // Safety: clamped into LocalMmiRange (0.0..=12.0) on the line above, so
+    // construction cannot fail.
+    LocalMmi::new(raw.clamp(0.0, 12.0)).expect("clamped value is always within LocalMmiRange")
 }
 
 #[cfg(test)]
@@ -122,25 +205,35 @@ mod tests {
         )
     }
 
-    fn sample_quake(magnitude: f64, quality: QuakeQuality) -> Earthquake {
+    /// A recent (not literally now, to avoid float-seconds flakiness)
+    /// timestamp `age_days` old, formatted the way GeoNet's API emits one.
+    fn timestamp_days_ago(age_days: f64) -> QuakeTime {
+        let when =
+            time::OffsetDateTime::now_utc() - time::Duration::seconds((age_days * 86400.0) as i64);
+        let formatted = when
+            .format(&time::format_description::well_known::Iso8601::DEFAULT)
+            .expect("OffsetDateTime always formats as ISO-8601");
+        QuakeTime::parse(&formatted).expect("just-formatted timestamp always reparses")
+    }
+
+    fn sample_quake(magnitude: f64, quality: QuakeQuality, age_days: f64) -> Earthquake {
         Earthquake {
-            time: QuakeTime::parse("2020-01-01T00:00:00.000Z").unwrap(),
+            time: timestamp_days_ago(age_days),
             magnitude: Magnitude::new(magnitude).unwrap(),
             depth: Depth::new(10.0).unwrap(),
             quality,
             mmi: Mmi::new(4).ok(),
             epicenter: wellington(),
-            score: 0.0,
+            local_mmi: LocalMmi::new(0.0).unwrap(),
         }
     }
 
     #[test]
-    fn test_score_and_filter_drops_deleted_and_small() {
+    fn test_score_and_filter_drops_deleted() {
         let data = QuakeData {
             earthquakes: vec![
-                sample_quake(5.0, QuakeQuality::Best),
-                sample_quake(5.0, QuakeQuality::Deleted),
-                sample_quake(2.5, QuakeQuality::Best),
+                sample_quake(6.0, QuakeQuality::Best, 0.0),
+                sample_quake(6.0, QuakeQuality::Deleted, 0.0),
             ],
             user_location: wellington(),
         };
@@ -151,20 +244,101 @@ mod tests {
     }
 
     #[test]
-    fn test_score_and_filter_caps_at_eight() {
-        let earthquakes = (0..12).map(|_| sample_quake(5.0, QuakeQuality::Best)).collect();
+    fn test_score_and_filter_no_longer_filters_on_magnitude_alone() {
+        // A small, very close quake can still have a locally-significant
+        // MMI — the old flat magnitude>=3.0 floor is gone (see
+        // quake-significance-metric decision).
+        let data = QuakeData {
+            earthquakes: vec![sample_quake(2.5, QuakeQuality::Best, 0.0)],
+            user_location: wellington(),
+        };
+
+        let filtered = data.score_and_filter();
+        assert_eq!(filtered.earthquakes.len(), 1);
+    }
+
+    #[test]
+    fn test_score_and_filter_caps_at_fifteen() {
+        let earthquakes = (0..20)
+            .map(|_| sample_quake(7.0, QuakeQuality::Best, 0.0))
+            .collect();
         let data = QuakeData {
             earthquakes,
             user_location: wellington(),
         };
 
         let filtered = data.score_and_filter();
-        assert_eq!(filtered.earthquakes.len(), 8);
+        assert_eq!(filtered.earthquakes.len(), 15);
+    }
+
+    #[test]
+    fn test_score_and_filter_backfills_to_floor_of_ten() {
+        // Weak, distant-in-significance-terms quakes that individually sit
+        // below RETENTION_THRESHOLD should still backfill up to the floor
+        // rather than leaving a near-empty list.
+        let earthquakes = (0..12)
+            .map(|_| sample_quake(0.0, QuakeQuality::Best, 0.0))
+            .collect();
+        let data = QuakeData {
+            earthquakes,
+            user_location: wellington(),
+        };
+
+        let filtered = data.score_and_filter();
+        assert_eq!(filtered.earthquakes.len(), 10);
+    }
+
+    #[test]
+    fn test_score_and_filter_drops_quakes_older_than_32_days() {
+        let data = QuakeData {
+            earthquakes: vec![sample_quake(8.0, QuakeQuality::Best, 40.0)],
+            user_location: wellington(),
+        };
+
+        let filtered = data.score_and_filter();
+        assert!(filtered.earthquakes.is_empty());
+    }
+
+    #[test]
+    fn test_score_and_filter_sorts_by_local_mmi_descending() {
+        let data = QuakeData {
+            earthquakes: vec![
+                sample_quake(4.0, QuakeQuality::Best, 0.0),
+                sample_quake(7.0, QuakeQuality::Best, 0.0),
+                sample_quake(5.5, QuakeQuality::Best, 0.0),
+            ],
+            user_location: wellington(),
+        };
+
+        let filtered = data.score_and_filter();
+        let mmis: Vec<f64> = filtered
+            .earthquakes
+            .iter()
+            .map(|eq| eq.local_mmi.value())
+            .collect();
+        let mut sorted_desc = mmis.clone();
+        sorted_desc.sort_by(|a, b| b.partial_cmp(a).unwrap());
+        assert_eq!(mmis, sorted_desc);
+    }
+
+    #[test]
+    fn test_calculate_local_mmi_deeper_reads_higher_at_same_distance_magnitude() {
+        let shallow = calculate_local_mmi(10.0, 50.0, 5.5).value();
+        let deeper = calculate_local_mmi(65.0, 50.0, 5.5).value();
+        assert!(deeper > shallow);
+    }
+
+    #[test]
+    fn test_calculate_local_mmi_clamped_to_range() {
+        // Far enough away and small enough that the raw formula goes
+        // negative — must clamp to LocalMmiRange's floor, not error.
+        let mmi = calculate_local_mmi(10.0, 2000.0, -2.0);
+        assert!((0.0..=12.0).contains(&mmi.value()));
     }
 
     #[test]
     fn test_distance_and_direction_from_same_point() {
-        let quake = sample_quake(5.0, QuakeQuality::Best);
+        let quake = sample_quake(5.0, QuakeQuality::Best, 0.0);
         assert!(quake.distance_km(&wellington()) < 0.001);
     }
 }

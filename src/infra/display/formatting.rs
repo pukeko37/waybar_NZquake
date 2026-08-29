@@ -10,7 +10,8 @@ pub fn day_band_header(day_band: DayBand) -> &'static str {
         DayBand::OneToTwoDays => "\n⏰ 1-2 days ago:",
         DayBand::TwoToFourDays => "\n⏰ 2-4 days ago:",
         DayBand::FourToEightDays => "\n⏰ 4-8 days ago:",
-        DayBand::Older => "\n⏰ 8+ days ago:",
+        DayBand::EightToSixteenDays => "\n⏰ 8-16 days ago:",
+        DayBand::SixteenToThirtyTwoDays => "\n⏰ 16-32 days ago:",
     }
 }
 
@@ -36,17 +37,17 @@ pub fn format_time(time: &QuakeTime) -> String {
         .unwrap_or_else(|_| "Unknown".to_string())
 }
 
-/// Whether a quake's score is (approximately) the highest in the batch —
+/// Whether a quake's local MMI is (approximately) the highest in the batch —
 /// used to highlight the top entry in the tooltip.
-pub fn should_highlight(score: f64, max_score: f64) -> bool {
-    (score - max_score).abs() < 0.001
+pub fn should_highlight(local_mmi: f64, max_local_mmi: f64) -> bool {
+    (local_mmi - max_local_mmi).abs() < 0.001
 }
 
-/// Find the maximum score among all earthquakes.
-pub fn find_max_score(earthquakes: &[Earthquake]) -> f64 {
+/// Find the maximum local MMI among all earthquakes.
+pub fn find_max_local_mmi(earthquakes: &[Earthquake]) -> f64 {
     earthquakes
         .iter()
-        .map(|eq| eq.score)
+        .map(|eq| eq.local_mmi.value())
         .max_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
         .unwrap_or(0.0)
 }
@@ -71,7 +72,7 @@ mod tests {
     #[test]
     fn test_day_band_header() {
         assert_eq!(day_band_header(DayBand::Today), "⏰ Last 24 hours:");
-        assert!(day_band_header(DayBand::Older).contains("8+ days ago"));
+        assert!(day_band_header(DayBand::SixteenToThirtyTwoDays).contains("16-32 days ago"));
     }
 
     #[test]
