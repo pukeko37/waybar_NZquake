@@ -54,9 +54,13 @@ impl TryFrom<QuakeFeatureApi> for Earthquake {
         let quality = QuakeQuality::parse(&value.properties.quality)
             .with_context(|| format!("Unrecognised quality: {}", value.properties.quality))?;
 
+        // GeoNet's wire-format sentinel for "no felt reports" is `-1`, not
+        // an absent field — treat it as `None` rather than a domain-range
+        // failure. See [[mmi-not-felt-sentinel]] in the project wiki.
         let mmi = value
             .properties
             .mmi
+            .filter(|&m| m != -1)
             .map(Mmi::new)
             .transpose()
             .with_context(|| format!("MMI out of range: {:?}", value.properties.mmi))?;
@@ -123,6 +127,32 @@ mod tests {
         assert_eq!(earthquake.mmi.unwrap().value(), 4);
         assert_eq!(earthquake.epicenter.latitude.value(), -41.2865);
         assert_eq!(earthquake.epicenter.longitude.value(), 174.7762);
+    }
+
+    #[test]
+    fn test_quake_feature_mmi_not_felt_sentinel_becomes_none() {
+        // GeoNet's wire-format sentinel for "no felt reports" is `-1`, not
+        // absence of the field — see [[mmi-not-felt-sentinel]]. A `best`
+        // quality record carrying it must not fail domain validation.
+        let json_data = r#"
+        {
+            "properties": {
+                "time": "2024-01-13T14:30:00.000Z",
+                "magnitude": 4.8,
+                "depth": 80.0,
+                "quality": "best",
+                "mmi": -1
+            },
+            "geometry": {
+                "coordinates": [174.24, -40.33]
+            }
+        }
+        "#;
+
+        let feature: QuakeFeatureApi = serde_json::from_str(json_data).expect("Valid JSON");
+        let earthquake: Earthquake = feature.try_into().expect("Valid domain conversion");
+
+        assert!(earthquake.mmi.is_none());
     }
 
     #[test]
