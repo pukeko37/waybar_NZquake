@@ -61,51 +61,30 @@ pub struct QuakeData {
     pub user_location: Coordinates,
 }
 
-/// Half-life, in days, of a quake's retention significance — also the
-/// window's outer edge, by construction: a quake at `MIN_SURVIVING_MMI`
-/// today decays to exactly `RETENTION_THRESHOLD` at this many days old. See
-/// [[quake-significance-metric]] in the project wiki for the reasoning.
-const SIGNIFICANCE_HALF_LIFE_DAYS: f64 = 32.0;
+/// Hard outer edge of the retention window, in days. See
+/// [[tooltip-retention-mmi-floor]] (superseding
+/// [[quake-significance-metric]]'s 32-day/decay scheme) — extended to match
+/// `DayBand`'s seventh bracket, `ThirtyTwoToSixtyFourDays`.
+const MAX_RETAINED_AGE_DAYS: f64 = 64.0;
 
-/// A quake at or below this local MMI today is already at (or below) the
-/// retention threshold and never enters the retained set.
-const MIN_SURVIVING_MMI: f64 = 4.0;
-
-/// Retained while `local_mmi * 0.5^(age_days / SIGNIFICANCE_HALF_LIFE_DAYS)`
-/// is at or above this. Derived, not independently chosen: half of
-/// `MIN_SURVIVING_MMI`, which is what makes the half-life above exactly
-/// equal to the 32-day retention window.
-const RETENTION_THRESHOLD: f64 = MIN_SURVIVING_MMI / 2.0;
-
-/// Hard outer edge of the retention window, in days. Independent of decay —
-/// a quake older than this is dropped regardless of how significant it
-/// still reads, since there's no day-band bracket beyond it to show it in.
-const MAX_RETAINED_AGE_DAYS: f64 = 32.0;
-
-/// Retained-set size floor: backfill with the next-highest-significance
-/// quakes below `RETENTION_THRESHOLD` if fewer than this many clear it, so a
-/// quiet month doesn't produce a near-empty tooltip.
-const MIN_RETAINED_COUNT: usize = 10;
-
-/// Retained-set size ceiling, applied after sorting by significance
-/// descending — the lowest-significance excess is dropped.
-const MAX_RETAINED_COUNT: usize = 15;
+/// A quake's undecayed `local_mmi` must be at or above this to be retained.
+/// No decay, no count floor/ceiling — see [[tooltip-retention-mmi-floor]].
+const MIN_RETAINED_LOCAL_MMI: f64 = 3.0;
 
 impl QuakeData {
-    /// Compute each quake's local MMI, retain the last
-    /// [`MAX_RETAINED_AGE_DAYS`] days' worth by decayed significance
-    /// (floor [`MIN_RETAINED_COUNT`], ceiling [`MAX_RETAINED_COUNT`]), and
-    /// sort the retained set by day band ascending (most recent band
-    /// first), then quake time ascending within a band — see
-    /// [[quake-tooltip-display-order]], superseding
-    /// [[quake-significance-metric]]'s original "raw local MMI, descending"
-    /// display order. Consumes `self` and returns a new `QuakeData` rather
-    /// than mutating in place, per house style's preference for functional
-    /// transformation over mutation.
+    /// Compute each quake's local MMI, retain those within
+    /// [`MAX_RETAINED_AGE_DAYS`] whose `local_mmi` clears
+    /// [`MIN_RETAINED_LOCAL_MMI`] (no decay, no count floor/ceiling — see
+    /// [[tooltip-retention-mmi-floor]]), and sort the retained set by day
+    /// band ascending (most recent band first), then quake time ascending
+    /// within a band — see [[quake-tooltip-display-order]]. Consumes `self`
+    /// and returns a new `QuakeData` rather than mutating in place, per
+    /// house style's preference for functional transformation over
+    /// mutation.
     pub fn score_and_filter(self) -> Self {
         let user_location = self.user_location;
 
-        let mut candidates: Vec<(Earthquake, f64)> = self
+        let mut earthquakes: Vec<Earthquake> = self
             .earthquakes
             .into_iter()
             .filter(|eq| eq.quality != QuakeQuality::Deleted)
@@ -119,32 +98,18 @@ impl QuakeData {
                 eq.local_mmi =
                     calculate_local_mmi(eq.depth.value(), distance_km, eq.magnitude.value());
 
-                let significance =
-                    eq.local_mmi.value() * 0.5_f64.powf(age_days / SIGNIFICANCE_HALF_LIFE_DAYS);
-                Some((eq, significance))
+                if eq.local_mmi.value() < MIN_RETAINED_LOCAL_MMI {
+                    return None;
+                }
+
+                Some(eq)
             })
-            .collect();
-
-        candidates.sort_by(|(_, a), (_, b)| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
-
-        let above_threshold = candidates
-            .iter()
-            .filter(|(_, significance)| *significance >= RETENTION_THRESHOLD)
-            .count();
-        let take_count = above_threshold
-            .clamp(MIN_RETAINED_COUNT, MAX_RETAINED_COUNT)
-            .min(candidates.len());
-
-        let mut earthquakes: Vec<Earthquake> = candidates
-            .into_iter()
-            .take(take_count)
-            .map(|(eq, _)| eq)
             .collect();
 
         // Day band ascending (`Today` first — most recent band first), then
         // quake time ascending within a band (oldest first) — see
         // [[quake-tooltip-display-order]]. `local_mmi` no longer determines
-        // storage order; retention above already used it via `S(t)`.
+        // storage order or membership beyond the flat floor above.
         earthquakes.sort_by(|a, b| {
             a.day_band().cmp(&b.day_band()).then_with(|| {
                 b.time
@@ -268,7 +233,9 @@ mod tests {
     }
 
     #[test]
-    fn test_score_and_filter_caps_at_fifteen() {
+    fn test_score_and_filter_has_no_count_cap() {
+        // Per tooltip-retention-mmi-floor: no ceiling — every quake clearing
+        // the age + local_mmi filters is retained, however many that is.
         let earthquakes = (0..20)
             .map(|_| sample_quake(7.0, QuakeQuality::Best, 0.0))
             .collect();
@@ -278,14 +245,13 @@ mod tests {
         };
 
         let filtered = data.score_and_filter();
-        assert_eq!(filtered.earthquakes.len(), 15);
+        assert_eq!(filtered.earthquakes.len(), 20);
     }
 
     #[test]
-    fn test_score_and_filter_backfills_to_floor_of_ten() {
-        // Weak, distant-in-significance-terms quakes that individually sit
-        // below RETENTION_THRESHOLD should still backfill up to the floor
-        // rather than leaving a near-empty list.
+    fn test_score_and_filter_has_no_backfill_floor() {
+        // Per tooltip-retention-mmi-floor: no minimum count — quakes below
+        // MIN_RETAINED_LOCAL_MMI are dropped outright, not backfilled.
         let earthquakes = (0..12)
             .map(|_| sample_quake(0.0, QuakeQuality::Best, 0.0))
             .collect();
@@ -295,18 +261,43 @@ mod tests {
         };
 
         let filtered = data.score_and_filter();
-        assert_eq!(filtered.earthquakes.len(), 10);
+        assert!(filtered.earthquakes.is_empty());
     }
 
     #[test]
-    fn test_score_and_filter_drops_quakes_older_than_32_days() {
+    fn test_score_and_filter_drops_quakes_below_local_mmi_floor() {
+        // A distant, low-magnitude quake with local_mmi well under 3.0 is
+        // dropped even though it's recent — the flat floor, not decay,
+        // governs membership now.
         let data = QuakeData {
-            earthquakes: vec![sample_quake(8.0, QuakeQuality::Best, 40.0)],
+            earthquakes: vec![sample_quake(1.0, QuakeQuality::Best, 0.0)],
             user_location: wellington(),
         };
 
         let filtered = data.score_and_filter();
         assert!(filtered.earthquakes.is_empty());
+    }
+
+    #[test]
+    fn test_score_and_filter_drops_quakes_older_than_64_days() {
+        let data = QuakeData {
+            earthquakes: vec![sample_quake(8.0, QuakeQuality::Best, 70.0)],
+            user_location: wellington(),
+        };
+
+        let filtered = data.score_and_filter();
+        assert!(filtered.earthquakes.is_empty());
+    }
+
+    #[test]
+    fn test_score_and_filter_retains_quakes_up_to_64_days_old_if_significant() {
+        let data = QuakeData {
+            earthquakes: vec![sample_quake(8.0, QuakeQuality::Best, 50.0)],
+            user_location: wellington(),
+        };
+
+        let filtered = data.score_and_filter();
+        assert_eq!(filtered.earthquakes.len(), 1);
     }
 
     #[test]

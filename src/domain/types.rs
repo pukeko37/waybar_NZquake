@@ -247,12 +247,13 @@ impl fmt::Display for CompassDirection {
 
 // === Day Band ===
 
-/// Groups earthquakes by age for tooltip display, extended to six bands to
-/// match the 32-day retention window (see [[quake-significance-metric]]).
-/// `from_age_days` is total over `0..=32` days — the retention step in
+/// Groups earthquakes by age for tooltip display, extended to seven bands to
+/// match the 64-day retention window (see [[tooltip-retention-mmi-floor]],
+/// superseding [[quake-significance-metric]]'s six-band/32-day scheme).
+/// `from_age_days` is total over `0..=64` days — the retention step in
 /// `QuakeData::score_and_filter` is what guarantees every quake reaching
 /// display is within that window; a caller invoking this on an older
-/// timestamp will get `SixteenToThirtyTwoDays` rather than a dedicated
+/// timestamp will get `ThirtyTwoToSixtyFourDays` rather than a dedicated
 /// "older" band, since there no longer is one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum DayBand {
@@ -262,6 +263,7 @@ pub enum DayBand {
     FourToEightDays,
     EightToSixteenDays,
     SixteenToThirtyTwoDays,
+    ThirtyTwoToSixtyFourDays,
 }
 
 impl DayBand {
@@ -276,8 +278,10 @@ impl DayBand {
             Self::FourToEightDays
         } else if age_days < 16.0 {
             Self::EightToSixteenDays
-        } else {
+        } else if age_days < 32.0 {
             Self::SixteenToThirtyTwoDays
+        } else {
+            Self::ThirtyTwoToSixtyFourDays
         }
     }
 }
@@ -421,12 +425,17 @@ mod tests {
             DayBand::from_age_days(30.0),
             DayBand::SixteenToThirtyTwoDays
         );
+        assert_eq!(
+            DayBand::from_age_days(50.0),
+            DayBand::ThirtyTwoToSixtyFourDays
+        );
     }
 
     #[test]
     fn test_day_band_ordering() {
         assert!(DayBand::Today < DayBand::OneToTwoDays);
         assert!(DayBand::EightToSixteenDays < DayBand::SixteenToThirtyTwoDays);
+        assert!(DayBand::SixteenToThirtyTwoDays < DayBand::ThirtyTwoToSixtyFourDays);
     }
 
     #[test]

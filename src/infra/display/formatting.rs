@@ -12,6 +12,7 @@ pub fn day_band_header(day_band: DayBand) -> &'static str {
         DayBand::FourToEightDays => "\n⏰ 4-8 days ago:",
         DayBand::EightToSixteenDays => "\n⏰ 8-16 days ago:",
         DayBand::SixteenToThirtyTwoDays => "\n⏰ 16-32 days ago:",
+        DayBand::ThirtyTwoToSixtyFourDays => "\n⏰ 32-64 days ago:",
     }
 }
 
